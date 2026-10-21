@@ -1,4 +1,5 @@
 #include "native_material.h"
+#include <corona/utils/runtime_paths.h>
 #include <corona/utils/scene_path_key.h>
 #include <corona/diagnostics/thread_phase.h>
 #include <corona/events/display_system_events.h>
@@ -55,11 +56,8 @@
 #include "../common/diagnostic_env.h"
 #include "../common/vision_restir_settings.h"
 
-// CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
-
 //#define CORONA_VISION_IMPORT_DEMO
 
-#ifdef CORONA_ENABLE_VISION
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -70,6 +68,7 @@
 #include "base/mgr/pipeline.h"
 #include "base/mgr/switch_profile.h"
 #include "base/mgr/scene.h"
+#include "base/scattering/material.h"
 #include "base/sensor/frame_buffer.h"
 #include "base/sensor/light_field_types.h"
 #include "base/sensor/sensor.h"
@@ -83,7 +82,6 @@
 #include "vision/vision_render_mode_config.h"
 #include "vision/vision_interop_lifetime.h"
 #include "vision/vision_zero_copy_bridge.h"
-#endif
 
 namespace {
 
@@ -554,7 +552,7 @@ struct CursorIconPixels {
 
 std::filesystem::path find_mouse_icon_path() {
     std::error_code ec;
-    auto current = std::filesystem::current_path(ec);
+    auto current = Corona::Utils::executable_directory();
     if (!ec) {
         for (auto dir = current; !dir.empty(); dir = dir.parent_path()) {
             auto candidate = dir / kMouseIconRelativePath;
@@ -616,7 +614,7 @@ std::optional<CursorIconPixels> load_mouse_icon_pixels() {
 
 std::filesystem::path find_relative_asset_path(const std::filesystem::path& relative_path) {
     std::error_code ec;
-    auto current = std::filesystem::current_path(ec);
+    auto current = Corona::Utils::executable_directory();
     if (!ec) {
         for (auto dir = current; !dir.empty(); dir = dir.parent_path()) {
             auto candidate = dir / relative_path;
@@ -712,7 +710,6 @@ void mix_hash_float(std::size_t& sig, float value) {
     mix_hash(sig, static_cast<std::size_t>(bits));
 }
 
-#ifdef CORONA_ENABLE_VISION
 constexpr uint64_t kVisionRuntimeIdleEvictFrames = 240;
 
 [[nodiscard]] ::vision::float4x4 corona_transform_to_vision_o2w(
@@ -907,7 +904,6 @@ struct ExternalLiveResolvedTransform {
 
     return std::nullopt;
 }
-#endif
 
 void apply_pending_camera_moves() {
     auto& hub = Corona::SharedDataHub::instance();
@@ -1810,9 +1806,6 @@ bool upload_instance_tables(const RenderInstanceBatch& batch,
     return true;
 }
 
-#ifdef CORONA_ENABLE_VISION
-vision::Device* visionDevicePtr = nullptr;
-
 [[nodiscard]] auto make_default_vision_project_desc() -> vision::ProjectDesc {
     // Each *Desc has in-class default initializers; the overridden
     // init(const ParameterSet&) is only used for JSON-driven configuration.
@@ -2417,7 +2410,6 @@ void validate_vision_source_node(const vision::DataWrap& node,
 constexpr const char* kVisionDemoScenePath =
     R"(E:\CoronaExample\test_vision\render_scene\cbox\vision_scene.json)";
 #endif
-#endif  // CORONA_ENABLE_VISION
 }  // namespace
 
 namespace Corona::Systems {
@@ -2449,14 +2441,6 @@ struct OpticsSystem::UiViewResources {
     uint64_t last_used_frame = 0;
 };
 
-#ifdef CORONA_ENABLE_VISION
-[[nodiscard]] bool vision_zero_copy_forced_disabled() {
-    static const bool disabled =
-        Vision::vision_zero_copy_disabled_from_value(
-            std::getenv("CORONA_VISION_DISABLE_ZERO_COPY"));
-    return disabled;
-}
-
 struct OpticsSystem::VisionPipelineRuntime {
     ocarina::SP<vision::Pipeline> pipeline;
     std::shared_ptr<VisionSceneResource> scene_resource;
@@ -2472,9 +2456,6 @@ struct OpticsSystem::VisionPipelineRuntime {
     // Zero-copy path: shares Vision's pre-tonemap linear color buffer with Vulkan
     // and resolves it via the vision_resolve compute pass.
     std::unordered_map<std::uintptr_t, std::unique_ptr<Vision::VisionZeroCopyBridge>> bridges;
-    std::unordered_set<std::uintptr_t> zero_copy_disabled;
-    std::unordered_map<std::uintptr_t, Horizon::HardwareBuffer> readback_buffers;
-    std::unordered_map<std::uintptr_t, std::vector<ocarina::float4>> readback_pixels;
     std::unordered_set<std::uintptr_t> retained_contexts;
     std::unordered_map<std::uintptr_t, bool> view_denoise_states;
     std::unordered_map<std::uintptr_t, CameraVisionDenoiser> view_denoiser_types;
@@ -2533,9 +2514,9 @@ struct OpticsSystem::VisionPipelineRuntime {
             interop_submissions.size(),
             retained_contexts.size());
         if (pipeline) {
-            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown committing CUDA work");
+            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown committing compute work");
             pipeline->commit_command();
-            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown CUDA work committed");
+            CFW_LOG_INFO("OpticsSystem: Vision runtime teardown compute work committed");
         }
         Vision::drain_vision_interop_submissions(
             interop_submissions,
@@ -2577,9 +2558,6 @@ struct OpticsSystem::VisionPipelineRuntime {
 
     void clear_camera_runtime_state() noexcept {
         bridges.clear();
-        zero_copy_disabled.clear();
-        readback_buffers.clear();
-        readback_pixels.clear();
         retained_contexts.clear();
         view_denoise_states.clear();
         view_denoiser_types.clear();
@@ -2688,9 +2666,6 @@ bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
             pipeline->commit_command();
             runtime.wait_for_interop_submission(camera_handle, "view context recreation");
             runtime.bridges.erase(camera_handle);
-            runtime.zero_copy_disabled.erase(camera_handle);
-            runtime.readback_buffers.erase(camera_handle);
-            runtime.readback_pixels.erase(camera_handle);
             runtime.retained_contexts.erase(camera_handle);
             runtime.view_denoise_states.erase(camera_handle);
             runtime.view_denoiser_types.erase(camera_handle);
@@ -3075,7 +3050,27 @@ void OpticsSystem::clear_vision_runtimes() {
     active_vision_runtime_key_.reset();
     last_vision_runtime_group_signature_ = 0;
 }
-#endif
+
+void OpticsSystem::shutdown_vision_backend() {
+    // Join stream workers and release shared imports, pipelines and scene GPU
+    // resources before invoking the backend's Device deleter. The executable
+    // ultimately calls TerminateProcess, so a function-static Device would
+    // never run its cleanup callbacks or release its Vulkan context.
+    clear_vision_runtimes();
+    if (vision_device_) {
+        CFW_LOG_INFO("OpticsSystem: destroying Vision compute device");
+        auto& global = vision::Global::instance();
+        global.set_pipeline(nullptr);
+        vision::ImagePool::destroy_instance();
+        // Material LUTs are process-global and outlive their scene bindless arrays.
+        // Release their texture owners while the compute device is still valid.
+        vision::MaterialLut::destroy_instance();
+        vision_device_.reset();
+        global.set_device(nullptr);
+        CFW_LOG_INFO("OpticsSystem: Vision compute device destroyed");
+    }
+    vision_initialized_ = false;
+}
 
 OpticsSystem::OpticsSystem() {
     // Useful for bounded validation and machines with limited cooling.
@@ -3174,9 +3169,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl, ktm::uvec3(8, 8, 1));
-#ifdef CORONA_ENABLE_VISION
         hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
-#endif
         hardware_->shaderHasInit = true;
     } catch (const std::exception& e) {
         CFW_LOG_CRITICAL("OpticsSystem: Failed to initialize typed pipelines: {}", e.what());
@@ -3572,22 +3565,17 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 CameraStateUpdateCommand command{};
                 command.camera_handle = event.camera_handle;
                 command.fields = CameraStateUpdateField::RenderBackend;
-#ifdef CORONA_ENABLE_VISION
                 command.render_backend =
                     event.backend == static_cast<int>(RenderBackend::Vision)
                         ? CameraRenderBackend::Vision
                         : CameraRenderBackend::Native;
-#else
-                command.render_backend = CameraRenderBackend::Native;
-#endif
                 SharedDataHub::instance().enqueue_camera_state_update(command);
             });
 
-#ifdef CORONA_ENABLE_VISION
         vision_scene_load_sub_id_ = event_bus->subscribe<Events::VisionSceneLoadEvent>(
             [this](const Events::VisionSceneLoadEvent& event) {
                 // Only stash the request here (any thread). The actual import touches
-                // the CUDA pipeline and MUST run on the render thread, so it is
+                // the Vulkan pipeline and MUST run on the render thread, so it is
                 // deferred to apply_pending_vision_scene_load() in update().
                 // Capture legacy relative load paths now, before deferred work.
                 // Embedded scene keys are relative to their explicit resource base.
@@ -3606,7 +3594,6 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                 std::lock_guard<std::mutex> lock(vision_scene_load_mutex_);
                 pending_vision_scene_load_ = std::move(request);
             });
-#endif
 
         residency_sub_id_ = event_bus->subscribe<Events::ActorResidencyChangedEvent>(
             [this](const Events::ActorResidencyChangedEvent& e) {
@@ -3731,7 +3718,6 @@ void OpticsSystem::update() {
         }
     }
 
-#ifdef CORONA_ENABLE_VISION
     std::vector<std::uintptr_t> requested_vision_cameras;
     bool camera_views_ready = true;
     for (const auto& scene : std::as_const(SharedDataHub::instance().scene_storage())) {
@@ -3763,7 +3749,6 @@ void OpticsSystem::update() {
             }
         }
     }
-#endif
 
     const bool shadow_pipelines_ready = std::all_of(
         hardware_->shadowPipelines.begin(), hardware_->shadowPipelines.end(),
@@ -4967,19 +4952,13 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                                        viewport.height,
                                                                        target.published_image});
                 }
-
-#ifdef CORONA_ENABLE_VISION
-                // (Vision render path runs in run_vision_frame below)
-#endif
             }
         }
     }
 
-#ifdef CORONA_ENABLE_VISION
     if (vision_initialized_) {
         run_vision_frame(frame_count, frame_index);
     }
-#endif
 
     // ���ճ��ڿ��У������� / �ӿڹرգ��� surface Ŀ�꣬Լ����̬�����µ��Դ�ռ�á�
     evict_idle_surface_targets(frame_index);
@@ -5460,7 +5439,6 @@ void OpticsSystem::enqueue_actor_pick_readback(
     }
 }
 
-#ifdef CORONA_ENABLE_VISION
 void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                              const CameraDevice& camera,
                                              const SceneDevice& scene,
@@ -5543,7 +5521,6 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                 scene_batch.nodeIndices,
                                 std::move(*actor_pick_reservation));
 }
-#endif
 
 bool OpticsSystem::has_pending_screenshot(std::uintptr_t camera_handle) {
     std::lock_guard<std::mutex> lock(screenshot_mutex_);
@@ -5713,11 +5690,9 @@ void OpticsSystem::shutdown() {
         if (backend_switch_sub_id_ != 0) {
             event_bus->unsubscribe(backend_switch_sub_id_);
         }
-#ifdef CORONA_ENABLE_VISION
         if (vision_scene_load_sub_id_ != 0) {
             event_bus->unsubscribe(vision_scene_load_sub_id_);
         }
-#endif
         if (residency_sub_id_ != 0) {
             event_bus->unsubscribe(residency_sub_id_);
         }
@@ -5750,13 +5725,11 @@ void OpticsSystem::shutdown() {
     offscreen_screenshot_targets_.clear();
     native_view_resources_.clear();
     ui_view_resources_.clear();
-#ifdef CORONA_ENABLE_VISION
-    clear_vision_runtimes();
-#endif
+    shutdown_vision_backend();
     hardware_.reset();
 
 }
-#ifdef CORONA_ENABLE_VISION
+
 std::size_t OpticsSystem::compute_vision_scene_signature() const {
     // Lightweight per-frame change detector. Traverses the same hierarchy as
     // build_vision_geometry (enabled scene �� actor �� profile �� optics �� geometry)
@@ -5871,7 +5844,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         // init_vision_lazy(). If we don't re-register the lights here, the
         // following scene.prepare() reinitialises the light sampler with a missing
         // (or geometry-introduced area-light only) env_light_, corrupting the
-        // light sampler's env index / PMF bookkeeping and crashing the CUDA device
+        // light sampler's env index / PMF bookkeeping and crashing the Vulkan device
         // (observed: process exit code -1 right after "Vision scene rebuilt").
         // Mirror the initialization path: always re-inject a single Infinite sky
         // light (+ optional point sun) from the current Corona environment so the
@@ -5899,7 +5872,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         // image_pool().prepare(stream()) -> ...). Re-running it on an already-initialised
         // pipeline reallocates the framebuffer / sensor / image-pool device buffers
         // that the render loop is already holding references to, which crashes the
-        // CUDA device (observed: crash on the following prepare_view_texture()).
+        // Vulkan device (observed: crash on the following prepare_view_texture()).
         //
         // The correct runtime update is an INCREMENTAL sequence that only refreshes
         // the parts affected by the topology change, while leaving the framebuffer,
@@ -5920,7 +5893,7 @@ Vision::VisionBuildResult OpticsSystem::rebuild_vision_scene(VisionPipelineRunti
         // light_sampler_->prepare(scene_bindless, scene_device), which rebuilds the on-device light count / PMF /
         // env-index buffers. Skipping it leaves the UniformLightSampler indexing a stale
         // light buffer with the new (different) light_num(), so the very first render()
-        // after the rebuild performs an out-of-bounds GPU read and crashes the CUDA
+        // after the rebuild performs an out-of-bounds GPU read and crashes the Vulkan
         // device (observed: process exit -1 right after "Vision scene rebuilt", with no
         // "This scene contains N light types" log emitted during the rebuild).
         // It must run AFTER prepare_geometry() because area lights reference shapes.
@@ -6641,31 +6614,33 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
 bool OpticsSystem::init_vision_lazy() {
     if (vision_initialized_) return true;
     try {
-        // ocarina::Device is non-default-constructible; use auto so the type is
-        // deduced from create_device(). Function-local static ensures single init.
-        static auto s_device = [] {
-            // Engine deployment puts Vision plugins beside the executable. The
-            // standalone hotfix setup may have registered ../bin first; its
-            // missing DLL aborts loading before the runtime directory is tried.
-            auto runtime_directory = std::filesystem::current_path();
+        // Keep the device across scene changes, but release it explicitly in
+        // shutdown instead of relying on static destruction after process exit.
+        if (!vision_device_) {
+            vision_device_ = std::make_unique<ocarina::Device>([] {
+                // Engine deployment puts Vision plugins beside the executable. The
+                // standalone hotfix setup may have registered ../bin first; its
+                // missing DLL aborts loading before the runtime directory is tried.
+                auto runtime_directory = std::filesystem::current_path();
 #ifdef _WIN32
-            std::vector<wchar_t> executable_path(32768);
-            const auto length = GetModuleFileNameW(
-                nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
-            if (length == 0 || length >= executable_path.size()) {
-                throw std::runtime_error("Cannot resolve the Vision runtime directory");
-            }
-            runtime_directory = std::filesystem::path(
-                std::wstring(executable_path.data(), length)).parent_path();
+                std::vector<wchar_t> executable_path(32768);
+                const auto length = GetModuleFileNameW(
+                    nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
+                if (length == 0 || length >= executable_path.size()) {
+                    throw std::runtime_error("Cannot resolve the Vision runtime directory");
+                }
+                runtime_directory = std::filesystem::path(
+                    std::wstring(executable_path.data(), length)).parent_path();
 #endif
-            auto& context = ocarina::RHIContext::instance();
-            ocarina::DynamicModule::clear_search_path();
-            context.init(runtime_directory);
-            return context.create_device("cuda");
-        }();
-        visionDevicePtr = &s_device;
-        visionDevicePtr->init_rtx();
-        vision::Global::instance().set_device(visionDevicePtr);
+                auto& context = ocarina::RHIContext::instance();
+                ocarina::DynamicModule::clear_search_path();
+                context.init(runtime_directory);
+                CFW_LOG_INFO("OpticsSystem: Vision compute backend = vulkan-compute");
+                return context.create_device();
+            }());
+        }
+        vision_device_->init_rtx();
+        vision::Global::instance().set_device(vision_device_.get());
         vision::Global::instance().set_scene_path(std::filesystem::current_path());
 
 #ifdef CORONA_VISION_IMPORT_DEMO
@@ -6797,7 +6772,7 @@ bool OpticsSystem::init_vision_lazy() {
         // only allocated during Pipeline::prepare() (Scene::prepare -> Sensor::prepare
         // -> EncodedObject::prepare_data -> reset_device_buffer). Running it
         // before prepare() uploads into unallocated device memory and crashes the
-        // CUDA device deterministically.
+        // Vulkan device deterministically.
         for (auto sd_it = SharedDataHub::instance().scene_storage().cbegin();
              sd_it != SharedDataHub::instance().scene_storage().cend(); ++sd_it) {
             const auto& sd = *sd_it;
@@ -6884,44 +6859,6 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     runtime.view_denoiser_types.erase(camera_handle);
                 }
             }
-            for (auto it = runtime.readback_buffers.begin();
-                 it != runtime.readback_buffers.end();) {
-                if (active_contexts.contains(it->first)) {
-                    ++it;
-                    continue;
-                }
-                const auto camera_handle = it->first;
-                bool camera_exists = false;
-                bool retain_context = false;
-                if (auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(
-                        camera_handle)) {
-                    camera_exists = true;
-                    retain_context = camera->surface != nullptr;
-                }
-
-                if (retain_context) {
-                    if (!runtime.retained_contexts.contains(camera_handle)) {
-                        pipeline->commit_command();
-                        pipeline->invalidate_view_context(camera_handle);
-                        runtime.retained_contexts.insert(camera_handle);
-                    }
-                    ++it;
-                    continue;
-                }
-
-                pipeline->commit_command();
-                runtime.readback_pixels.erase(camera_handle);
-                runtime.zero_copy_disabled.erase(camera_handle);
-                it = runtime.readback_buffers.erase(it);
-                if (camera_exists) {
-                    pipeline->invalidate_view_context(camera_handle);
-                    runtime.retained_contexts.insert(camera_handle);
-                } else {
-                    pipeline->remove_view_context(camera_handle);
-                    runtime.view_denoise_states.erase(camera_handle);
-                    runtime.view_denoiser_types.erase(camera_handle);
-                }
-            }
             for (auto it = runtime.retained_contexts.begin();
                  it != runtime.retained_contexts.end();) {
                 if (SharedDataHub::instance().camera_storage().try_acquire_read(*it)) {
@@ -6961,6 +6898,16 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     return;
                 }
 
+                auto& bridge = runtime.bridges[cam_handle];
+                if (!bridge) {
+                    bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
+                }
+                // Keep failed bridges tracked for normal view cleanup. A resize,
+                // scene reload or view recreation provides a fresh retry.
+                if (bridge->failed()) {
+                    return;
+                }
+
                 Vision::sync_vision_camera(*pipeline, camera);
                 pipeline->upload_data();
                 pipeline->display(1.0 / 60.0);
@@ -6975,58 +6922,16 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const uint32_t w = res.x;
                 const uint32_t h = res.y;
 
-                const uint64_t pixel_count = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-                std::optional<uint32_t> vision_src_descriptor;
-                bool used_zero_copy = false;
-                if (!vision_zero_copy_forced_disabled() &&
-                    !runtime.zero_copy_disabled.contains(cam_handle)) {
-                    // CUDA is about to write the shared allocation. The preceding Vulkan
-                    // resolve must finish first until external timeline semaphores replace
-                    // this conservative CPU-side synchronization.
-                    runtime.wait_for_interop_submission(cam_handle,
-                                                        "zero-copy buffer reuse",
-                                                        false);
-                    auto& bridge = runtime.bridges[cam_handle];
-                    if (!bridge) {
-                        bridge = std::make_unique<Vision::VisionZeroCopyBridge>();
-                    }
-                    if (bridge->ensure(*pipeline, w, h) &&
-                        bridge->copy_from_framebuffer(*pipeline)) {
-                        vision_src_descriptor = bridge->imported().store_descriptor();
-                        used_zero_copy = true;
-                    } else {
-                        runtime.wait_for_interop_submission(cam_handle, "failed bridge release");
-                        runtime.bridges.erase(cam_handle);
-                        runtime.zero_copy_disabled.insert(cam_handle);
-                    }
+                // The preceding resolve must finish before Vision reuses or
+                // reallocates its shared buffer. Frame pixels never visit the CPU.
+                runtime.wait_for_interop_submission(cam_handle, "shared buffer reuse", false);
+                if (!bridge->ensure(*pipeline, w, h) ||
+                    !bridge->copy_from_framebuffer(*pipeline)) {
+                    // The bridge logs and latches the failure. Do not resolve an
+                    // invalid descriptor or publish stale pixels as a new frame.
+                    return;
                 }
-
-                if (!vision_src_descriptor) {
-                    auto& pixels = runtime.readback_pixels[cam_handle];
-                    pixels.resize(pixel_count);
-
-                    const auto src = fb->display_source_buffer();
-                    pipeline->stream() << src.download(pixels.data())
-                                       << ocarina::synchronize()
-                                       << ocarina::commit();
-
-                    auto& fallback_buffer = runtime.readback_buffers[cam_handle];
-                    const uint64_t float_count = pixel_count * 4u;
-                    if (!fallback_buffer ||
-                        fallback_buffer.get_element_count() != float_count) {
-                        fallback_buffer = make_storage_buffer<float>(
-                            float_count, "optics.vision_readback");
-                    }
-                    if (!fallback_buffer.write_bytes(
-                            std::as_bytes(std::span<const ocarina::float4>(
-                                pixels.data(), pixels.size())))) {
-                        CFW_LOG_ERROR(
-                            "OpticsSystem: unable to upload Vision fallback buffer for camera {}",
-                            cam_handle);
-                        return;
-                    }
-                    vision_src_descriptor = fallback_buffer.store_descriptor();
-                }
+                const uint32_t vision_src_descriptor = bridge->imported().store_descriptor();
 
                 void* surface = camera.surface;
                 hardware_->gbufferSize = ktm::uvec2{w, h};
@@ -7043,7 +6948,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 {
                     auto& visionResolve = *hardware_->visionResolvePipeline;
                     visionResolve.pushConsts.gbufferSize = upload_value(hardware_->gbufferSize);
-                    visionResolve.pushConsts.srcBufferIndex = *vision_src_descriptor;
+                    visionResolve.pushConsts.srcBufferIndex = vision_src_descriptor;
                     visionResolve.pushConsts.outputImage =
                         target.final_output.store_descriptor();
                     visionResolve.pushConsts.exposure = 1.0f;
@@ -7066,10 +6971,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const Horizon::SubmitReceipt vision_submit_receipt =
                     stream << Horizon::commit();
                 hardware_->last_receipt = vision_submit_receipt;
-                if (used_zero_copy) {
-                    runtime.interop_submissions.insert_or_assign(cam_handle,
-                                                                 vision_submit_receipt);
-                }
+                runtime.interop_submissions.insert_or_assign(cam_handle, vision_submit_receipt);
 
                 process_pending_screenshots(cam_handle, *presented);
 
@@ -7619,7 +7521,5 @@ bool OpticsSystem::load_external_vision_scene_from_json(const VisionSceneLoadReq
         return false;
     }
 }
-
-#endif  // CORONA_ENABLE_VISION
 
 }  // namespace Corona::Systems

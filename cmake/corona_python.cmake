@@ -11,7 +11,7 @@
 #    - `CORONA_CONDA_ENV`: conda environment name (default: coronaengine-dev)
 # 4. Assert the discovered interpreter is from the conda environment and that
 #    its version is 3.13.x to match the ABI (python313.lib).
-# 5. Validate requirements listed in `editor/requirements.txt` via
+# 5. Validate requirements listed in `CoronaEditor/editor/requirements.txt` via
 #    `check_pip_modules.py`, optionally installing missing packages. Only runs
 #    when `BUILD_CORONA_EDITOR` is enabled.
 # 6. Create the `check_python_deps` custom target for manual re-validation.
@@ -69,12 +69,13 @@ endif()
 string(JSON _conda_env_count ERROR_VARIABLE _json_error LENGTH "${_conda_env_list_json}" "envs")
 set(_corona_conda_env_path "")
 
-if(NOT _json_error)
+if(NOT _json_error AND _conda_env_count GREATER 0)
     math(EXPR _conda_env_last_index "${_conda_env_count} - 1")
     foreach(_env_index RANGE 0 ${_conda_env_last_index})
         string(JSON _env_path GET "${_conda_env_list_json}" "envs" ${_env_index})
-        string(FIND "${_env_path}" "${CORONA_CONDA_ENV}" _env_name_pos)
-        if(NOT _env_name_pos EQUAL -1)
+        file(TO_CMAKE_PATH "${_env_path}" _env_normalized)
+        get_filename_component(_env_name "${_env_normalized}" NAME)
+        if(_env_name STREQUAL "${CORONA_CONDA_ENV}")
             set(_corona_conda_env_path "${_env_path}")
             break()
         endif()
@@ -134,7 +135,7 @@ unset(_corona_conda_env_path)
 
 message(STATUS "[Python] Final chosen interpreter: ${Python_EXECUTABLE} (${Python_VERSION})")
 
-set(CORONA_PY_REQUIREMENTS_FILE "${PROJECT_SOURCE_DIR}/editor/requirements.txt")
+set(CORONA_PY_REQUIREMENTS_FILE "${CORONA_EDITOR_SOURCE_DIR}/editor/requirements.txt")
 set(CORONA_PY_CHECK_SCRIPT "${PROJECT_SOURCE_DIR}/tools/build/check_pip_modules.py")
 
 # ------------------------------------------------------------------------------
@@ -175,13 +176,11 @@ endfunction()
 # ------------------------------------------------------------------------------
 function(corona_run_python_requirements_check)
     if(NOT EXISTS "${CORONA_PY_CHECK_SCRIPT}")
-        message(WARNING "[Python] Dependency check script missing: ${CORONA_PY_CHECK_SCRIPT}")
-        return()
+        message(FATAL_ERROR "[Python] Dependency check script missing: ${CORONA_PY_CHECK_SCRIPT}")
     endif()
 
     if(NOT EXISTS "${CORONA_PY_REQUIREMENTS_FILE}")
-        message(WARNING "[Python] requirements.txt not found: ${CORONA_PY_REQUIREMENTS_FILE}")
-        return()
+        message(FATAL_ERROR "[Python] requirements.txt not found: ${CORONA_PY_REQUIREMENTS_FILE}")
     endif()
 
     set(_CRP_ARGS -r "${CORONA_PY_REQUIREMENTS_FILE}" --no-unicode)
@@ -208,7 +207,7 @@ function(corona_run_python_requirements_check)
 
         message(FATAL_ERROR "[Python] Requirement check failed (exit code ${_CORONA_PY_RES}); see output above, fix issues, then re-run")
     else()
-        message(STATUS "[Python] Requirements satisfied; no installation needed")
+        message(STATUS "[Python] Requirements satisfied")
     endif()
 endfunction()
 

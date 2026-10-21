@@ -49,9 +49,8 @@ struct ScreenshotRequestEvent {
  * @brief Request to switch the optics render backend (published by script API,
  *        consumed by OpticsSystem).
  *
- * backend: 0 = Native (Vulkan rasterization), 1 = Vision (CUDA path tracing).
- * The switch is only meaningful when the engine is compiled with
- * CORONA_ENABLE_VISION; otherwise OpticsSystem keeps the Native backend.
+ * backend: 0 = Native (Vulkan rasterization), 1 = Vision (Vulkan path tracing).
+ * Vision initializes its device lazily when rendering is needed.
  */
 struct RenderBackendSwitchEvent {
     int backend = 0;
@@ -70,8 +69,8 @@ struct RenderBackendSwitchEvent {
  * Empty path and empty json means "unload the external scene and rebuild the
  * engine-driven scene from SharedDataHub".
  *
- * Only meaningful when the engine is compiled with CORONA_ENABLE_VISION and the
- * Vision backend is active. The actual import runs on the OpticsSystem render
+ * The request is applied when the Vision backend is active.
+ * The actual import runs on the OpticsSystem render
  * thread; this event only carries the path across the thread boundary.
  */
 struct VisionSceneLoadEvent {

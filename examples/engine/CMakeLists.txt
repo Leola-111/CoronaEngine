@@ -10,6 +10,17 @@ corona_add_example(
     COPY_ASSETS
 )
 
+if(MSVC)
+    target_sources(corona_engine PRIVATE runtime.manifest)
+endif()
+
+set(CORONA_ENGINE_RUNTIME_DIR "" CACHE PATH
+    "Optional short output directory for CoronaEngine and its runtime files")
+if(CORONA_ENGINE_RUNTIME_DIR)
+    set_target_properties(corona_engine PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CORONA_ENGINE_RUNTIME_DIR}")
+endif()
+
 # 链接 CoronaEngine 核心库（已包含所有系统）
 target_link_libraries(corona_engine PRIVATE
     corona::engine
@@ -26,31 +37,32 @@ add_custom_target(corona_engine_startup_config
 )
 add_dependencies(corona_engine corona_engine_startup_config)
 
-if(CORONA_BUILD_VISION)
-    # Dynamically loaded MODULE libraries are absent from TARGET_RUNTIME_DLLS
-    # of the executable. Deploy them and their dependencies explicitly.
-    get_property(_vision_plugins GLOBAL PROPERTY CORONA_VISION_PLUGIN_TARGETS)
-    list(APPEND _vision_plugins ocarina-backend-cuda)
-    add_custom_target(corona_engine_vision_runtime
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:corona_engine>"
-        DEPENDS ${_vision_plugins} copy_cuda_headers
-    )
-    foreach(_plugin IN LISTS _vision_plugins)
-        add_custom_command(TARGET corona_engine_vision_runtime POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:${_plugin}>" $<TARGET_RUNTIME_DLLS:${_plugin}>
-                "$<TARGET_FILE_DIR:corona_engine>"
-            COMMAND_EXPAND_LISTS VERBATIM
-        )
-    endforeach()
-    add_custom_command(TARGET corona_engine_vision_runtime POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "$<TARGET_FILE_DIR:ocarina-backend-cuda>/cuda"
-            "$<TARGET_FILE_DIR:corona_engine>/cuda"
-        VERBATIM
-    )
-    add_dependencies(corona_engine corona_engine_vision_runtime)
+# Dynamically loaded MODULE libraries are absent from TARGET_RUNTIME_DLLS
+# of the executable. Deploy them and their dependencies explicitly.
+get_property(_vision_plugins GLOBAL PROPERTY CORONA_VISION_PLUGIN_TARGETS)
+if(NOT TARGET ocarina-backend-vulkan-compute)
+    message(FATAL_ERROR "Vision requires the Ocarina Vulkan compute backend (Vulkan SDK and Slang).")
 endif()
+list(APPEND _vision_plugins ocarina-backend-vulkan-compute)
+add_custom_target(corona_engine_vision_runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:corona_engine>"
+    DEPENDS ${_vision_plugins} copy_slang_headers
+)
+foreach(_plugin IN LISTS _vision_plugins)
+    add_custom_command(TARGET corona_engine_vision_runtime POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${_plugin}>" $<TARGET_RUNTIME_DLLS:${_plugin}>
+            "$<TARGET_FILE_DIR:corona_engine>"
+        COMMAND_EXPAND_LISTS VERBATIM
+    )
+endforeach()
+add_custom_command(TARGET corona_engine_vision_runtime POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "$<TARGET_FILE_DIR:ocarina-backend-vulkan-compute>/slang"
+        "$<TARGET_FILE_DIR:corona_engine>/slang"
+    VERBATIM
+)
+add_dependencies(corona_engine corona_engine_vision_runtime)
 
 add_custom_command(TARGET corona_engine POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E rm -f

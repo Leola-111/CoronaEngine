@@ -30,7 +30,6 @@ int main(int argc, char* argv[]) {
         fs::remove(path);
         const auto missing = read_startup_config(path, nullptr);
         expect(!missing.file_loaded && !missing.switch_profile, "Missing file must default to off");
-
         write_config(path, R"({"profiling":{"switch_profile":true}})");
         auto config = read_startup_config(path, nullptr);
         expect(config.file_loaded && config.switch_profile, "File must enable profiling");
@@ -53,7 +52,10 @@ int main(int argc, char* argv[]) {
         }
         for (const auto* invalid : {"broken json", "[]", R"({"profiling":true})",
                                    R"({"profiling":{"switch_profile":"true"}})",
-                                   R"({"profiling":{"switch_profiler":true}})"}) {
+                                   R"({"profiling":{"switch_profiler":true}})",
+                                   R"({"vision":{"backend":"metal"}})",
+                                   R"({"vision":{"backend":true}})", R"({"vision":[]})",
+                                   R"({"vision":{"backend":"vulkan-compute"}})"}) {
             write_config(path, invalid);
             bool rejected = false;
             try { (void)read_startup_config(path, nullptr); }

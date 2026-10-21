@@ -3,9 +3,11 @@
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
 #include "base/mgr/switch_profile.h"
+#include "base/scattering/material.h"
 #include "base/sensor/sensor.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_external_live_aabb.h"
+#include "vision/vision_zero_copy_bridge.h"
 #include <filesystem>
 #include <fstream>
 #include <cmath>
@@ -1093,8 +1095,9 @@ struct VisionEmbeddedModeSwitchTest {
     // preparation path. Kept out of CTest because scene shader cold starts vary.
     static void benchmark_switches(const char* scene) {
         namespace fs = std::filesystem;
+        ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(fs::current_path());
-        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        static auto device = ocarina::RHIContext::instance().create_device();
         device.init_rtx();
         vision::Global::instance().set_device(&device);
         OpticsSystem system;
@@ -1142,7 +1145,7 @@ struct VisionEmbeddedModeSwitchTest {
         namespace profile = vision::switch_profile;
         ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(std::filesystem::current_path());
-        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        static auto device = ocarina::RHIContext::instance().create_device();
         device.init_rtx();
         vision::Global::instance().set_device(&device);
         OpticsSystem system;
@@ -1200,8 +1203,9 @@ struct VisionEmbeddedModeSwitchTest {
     // view context as OpticsSystem's editor render loop. It is not a CTest job.
     static void capture_camera_motion(const char* scene, const char* destination, bool fast = false) {
         namespace fs = std::filesystem;
+        ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(fs::current_path());
-        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        static auto device = ocarina::RHIContext::instance().create_device();
         device.init_rtx();
         vision::Global::instance().set_device(&device);
         OpticsSystem system;
@@ -1294,7 +1298,7 @@ struct VisionEmbeddedModeSwitchTest {
         const auto runtime_dir = fs::current_path();
         ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(runtime_dir);
-        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        static auto device = ocarina::RHIContext::instance().create_device();
         device.init_rtx();
         vision::Global::instance().set_device(&device);
         for (bool embedded : {true, false}) {
@@ -1404,7 +1408,41 @@ struct VisionEmbeddedModeSwitchTest {
         }
         std::cout << "PASS: scene assets reused across algorithms, reload and GPU retirement\n";
     }
-    static void run() {
+    static void check_shared_display(vision::Pipeline& pipeline) {
+        const auto resolution = pipeline.frame_buffer()->resolution();
+        Vision::VisionZeroCopyBridge bridge;
+        expect(bridge.ensure(pipeline, resolution.x, resolution.y),
+               "Vision display must export and import Vulkan external memory");
+        const auto descriptor = bridge.imported().store_descriptor();
+        for (int frame = 0; frame < 3; ++frame) {
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+            expect(bridge.ensure(pipeline, resolution.x, resolution.y) &&
+                       bridge.copy_from_framebuffer(pipeline),
+                   "consecutive Vision frames must transfer through the shared buffer");
+            expect(bridge.valid() && !bridge.failed() &&
+                       bridge.imported().store_descriptor() == descriptor,
+                   "steady-state display must reuse its shared allocation");
+        }
+        expect(bridge.ensure(pipeline, resolution.x + 1, resolution.y),
+               "shared buffer resize must reallocate and import successfully");
+        expect(!bridge.copy_from_framebuffer(pipeline) && bridge.failed() && !bridge.valid(),
+               "mismatched framebuffer must fail instead of publishing stale pixels");
+        expect(!bridge.ensure(pipeline, resolution.x, resolution.y) &&
+                   !bridge.copy_from_framebuffer(pipeline),
+               "a failed bridge must remain stopped until view recreation");
+
+        Vision::VisionZeroCopyBridge recreated;
+        expect(recreated.ensure(pipeline, resolution.x, resolution.y) &&
+                   recreated.copy_from_framebuffer(pipeline),
+               "view recreation must restore shared GPU display after a failure");
+        Vision::VisionZeroCopyBridge empty;
+        expect(!empty.ensure(pipeline, 0, resolution.y) && empty.failed() &&
+                   !empty.ensure(pipeline, resolution.x, resolution.y),
+               "allocation failure must latch without retrying each frame");
+        std::cout << "PASS: Vulkan shared display, reuse, resize, failure latch and recreation\n";
+    }
+    static void run(bool shared_display_only = false) {
         namespace fs = std::filesystem;
         const auto original_cwd = fs::current_path();
         const auto base = original_cwd / "embedded-mode-switch-test-assets";
@@ -1413,9 +1451,10 @@ struct VisionEmbeddedModeSwitchTest {
         const unsigned char white_tga[] = {0,0,2,0,0,0,0,0,0,0,0,0,1,0,1,0,24,0,255,255,255};
         std::ofstream(base / "albedo.tga", std::ios::binary).write(
             reinterpret_cast<const char*>(white_tga), sizeof(white_tga));
+        ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(original_cwd);
         // Keep the device alive until process exit: Vision's global kernel tools own GPU state.
-        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        static auto device = ocarina::RHIContext::instance().create_device();
         device.init_rtx();
         vision::Global::instance().set_device(&device);
         OpticsSystem system;
@@ -1443,6 +1482,15 @@ struct VisionEmbeddedModeSwitchTest {
         expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
                    16, 16, false, false), "camera must render before the unused base renderer");
         render(*pt, "PT-camera-before-base");
+        if (shared_display_only) {
+            check_shared_display(*pt);
+            pt.reset();
+            system.clear_vision_runtimes();
+            fs::remove(base / "albedo.tga");
+            fs::remove(base / "triangle.obj");
+            fs::remove(base);
+            return;
+        }
         pt->activate_view_context(0);
         pt->commit_command();
         render(*pt, "PT");
@@ -1612,8 +1660,12 @@ struct VisionEmbeddedModeSwitchTest {
         resource->mark_transforms_changed();
         pt->update_geometry();
         // Changing CWD must not change the meaning of relative source resources.
-        // The alternate working directory also contains Vision CUDA compiler headers.
-        fs::current_path(original_cwd.parent_path() / "examples" / "engine");
+        // Keep this fixture independent of the example engine's build layout.
+        const auto alternate_cwd = base / "alternate-cwd";
+        fs::create_directories(alternate_cwd);
+        fs::copy(original_cwd / "slang", alternate_cwd / "slang",
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        fs::current_path(alternate_cwd);
         const auto key = system.make_vision_pipeline_key(request.scene_key, CameraVisionRenderMode::SVGF,
                                                          Vision::VisionPipelineSource::ExternalLive);
         expect(system.ensure_external_vision_runtime(key) != nullptr,
@@ -1755,12 +1807,25 @@ struct VisionEmbeddedModeSwitchTest {
         fs::remove(base / "file-scene.json");
         fs::remove(base / "albedo.tga");
         fs::remove(base / "triangle.obj");
+        expect(fs::canonical(alternate_cwd).parent_path() == fs::canonical(base),
+               "alternate working directory must remain inside the test fixture");
+        fs::remove_all(alternate_cwd);
         fs::remove(base);
         std::cout << "PASS: PT/ReSTIR/SVGF mode switching and history reset\n";
     }
 };
 }
 int main(int argc, char** argv) {
+    // Test devices are function-static; release global texture owners before
+    // those devices are destroyed, including when a test throws.
+    struct RuntimeCleanup {
+        ~RuntimeCleanup() {
+            vision::Global::instance().set_pipeline(nullptr);
+            vision::ImagePool::destroy_instance();
+            vision::MaterialLut::destroy_instance();
+            vision::Global::instance().set_device(nullptr);
+        }
+    } runtime_cleanup;
     try {
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_mode_api();
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_accumulation_api();
@@ -1769,7 +1834,9 @@ int main(int argc, char** argv) {
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_reblur_settings_api();
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_relax_settings_api();
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_frame_timing();
-        if (argc == 2 && std::string(argv[1]) == "--scene-asset-reuse") {
+        if (argc == 2 && std::string(argv[1]) == "--shared-display") {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::run(true);
+        } else if (argc == 2 && std::string(argv[1]) == "--scene-asset-reuse") {
             Corona::Systems::VisionEmbeddedModeSwitchTest::check_scene_asset_reuse();
         } else if ((argc == 3 || (argc == 4 && std::string(argv[3]) == "--denoise")) &&
             std::string(argv[1]) == "--profile-switches") {

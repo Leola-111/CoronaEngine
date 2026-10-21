@@ -1,24 +1,20 @@
 #pragma once
 
 // Vision zero-copy bridge — shares Vision's pre-tonemap linear float4 color
-// buffer with the Vulkan engine via CUDA<->Vulkan external memory, eliminating
-// the per-frame GPU->CPU->GPU readback used by the [MANUAL-READBACK] path.
+// buffer with the Vulkan engine via Vulkan external memory. This is the only
+// Vision display path; failure stops publishing frames without CPU readback.
 //
-// Direction: Vision (CUDA) renders into the framebuffer-selected display source
-// (linear HDR, pre-tonemap). We copy that on-device into a CUDA *exportable*
+// Direction: Vision renders into the framebuffer-selected display source
+// (linear HDR, pre-tonemap). We copy that on-device into an Ocarina exportable
 // buffer, export its Win32 handle, and import it as a Vulkan HardwareBuffer. A
 // Vulkan compute pass (vision_resolve.comp) then applies exposure + ACES and
 // writes the engine's RGBA16F finalOutputImage. The final-color view_texture_ is
-// a cuArray and is intentionally NOT used (cuArray memory is not exportable).
+// display texture and is intentionally not used, avoiding double tone mapping.
 //
-// NOTE: no external CUDA/Vulkan timeline semaphore yet. Optics currently waits
-// for the preceding Vulkan submit receipt before allowing CUDA to reuse or
+// NOTE: no external Vulkan timeline semaphore yet. Optics currently waits
+// for the preceding Vulkan submit receipt before allowing Vision to reuse or
 // release this allocation. This is correct but CPU-serialized; a shared timeline
 // semaphore is the performance follow-up.
-//
-// Only compiled when CORONA_ENABLE_VISION is defined.
-
-#ifdef CORONA_ENABLE_VISION
 
 #include <horizon.h>
 
@@ -40,8 +36,8 @@ public:
 
     // (Re)allocates the shared exportable buffer and re-imports it into Vulkan
     // when the resolution changes. Safe to call every frame; a no-op when the
-    // dimensions are unchanged. Returns false if allocation/import failed, in
-    // which case the caller should fall back (e.g. skip this frame).
+    // dimensions are unchanged. Failure is latched until the bridge is recreated:
+    // callers must skip rendering/publishing this view while failed() is true.
     bool ensure(::vision::Pipeline& pipeline, uint32_t width, uint32_t height);
 
     // Copies the current pre-tonemap linear display source into the shared
@@ -54,15 +50,17 @@ public:
     // the resolve pass's source SSBO. Valid only after a successful ensure().
     [[nodiscard]] Corona::Horizon::HardwareBuffer& imported() noexcept { return imported_; }
     [[nodiscard]] bool valid() const noexcept { return valid_; }
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
     [[nodiscard]] uint32_t width() const noexcept { return width_; }
     [[nodiscard]] uint32_t height() const noexcept { return height_; }
 
 private:
-    // Releases the imported Vulkan buffer first, then the CUDA-side exportable
-    // buffer (Vulkan-before-CUDA ordering avoids the consumer outliving the
+    // Releases the imported Vulkan buffer first, then the Ocarina exportable
+    // buffer (consumer-before-producer ordering avoids the consumer outliving the
     // backing allocation). pimpl holds the ocarina Buffer<float4> to keep
     // ocarina types out of this engine-facing header.
     void release();
+    bool fail(const char* reason);
 
     struct Shared;       // owns the exported ocarina Buffer<float4>
     Shared* shared_ = nullptr;
@@ -70,8 +68,7 @@ private:
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     bool valid_ = false;
+    bool failed_ = false;
 };
 
 }  // namespace Corona::Systems::Vision
-
-#endif  // CORONA_ENABLE_VISION

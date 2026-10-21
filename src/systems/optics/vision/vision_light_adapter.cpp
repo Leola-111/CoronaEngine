@@ -1,7 +1,5 @@
 #include "vision_light_adapter.h"
 
-#ifdef CORONA_ENABLE_VISION
-
 #include <cmath>
 #include <vector>
 
@@ -27,7 +25,7 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     //    Infinite lights (e.g. directional + spherical) makes the second
     //    overwrite env_light_ while the first stays orphaned in the light list,
     //    corrupting the light sampler's env index / PMF bookkeeping and
-    //    crashing the CUDA device (observed: process exit code -1 right after
+    //    crashing the Vulkan device (observed: process exit code -1 right after
     //    "Vision scene rebuilt").
     //
     // Therefore: register a SINGLE Infinite "spherical" light as the sky dome
@@ -102,7 +100,7 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     //    Worse, each rebuild added a SECOND Infinite "spherical" light. Only the
     //    last one becomes env_light_, leaving the previous Infinite light as an
     //    orphan in lights_. This corrupts the light sampler's env index / PMF
-    //    bookkeeping and crashes the CUDA device - exactly the failure mode the
+    //    bookkeeping and crashes the Vulkan device - exactly the failure mode the
     //    comment at the top of this function warns about, just triggered across
     //    rebuilds instead of within a single call.
     //
@@ -122,7 +120,7 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
     // reference them, leaving the geometry's emission pointers dangling. The very
     // next light_sampler_->prepare() (inside renderer().prepare_lights()) then walks
     // an inconsistent light set whose Area entries point at freed objects, producing
-    // an out-of-bounds / use-after-free GPU access and crashing the CUDA device
+    // an out-of-bounds / use-after-free GPU access and crashing the Vulkan device
     // (observed: process exit -1 right after "task build_accel ...", with NO
     // "This scene contains N light types" log emitted - i.e. crash inside
     // light->prepare()).
@@ -152,5 +150,3 @@ void setup_vision_lights(::vision::Scene& scene, const EnvironmentDevice& env) {
 }
 
 }  // namespace Corona::Systems::Vision
-
-#endif  // CORONA_ENABLE_VISION

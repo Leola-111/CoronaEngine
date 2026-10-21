@@ -9,10 +9,8 @@
 #include <corona/shared_data_hub.h>
 #include <corona/systems/display/published_image.h>
 #include <corona/systems/optics/actor_pick_readback_worker.h>
-#ifdef CORONA_ENABLE_VISION
 #include <corona/systems/optics/vision_pipeline_key.h>
 #include <corona/systems/optics/vision_scene_resource.h>
-#endif
 
 #include <chrono>
 #include <atomic>
@@ -29,16 +27,18 @@
 // 前向声明 Hardware 结构体
 struct Hardware;
 
+namespace ocarina {
+class Device;
+}
+
 namespace Corona::Systems {
 
 class GeometrySystem;  // 前向声明，用于 LOD 查询
 
-#ifdef CORONA_ENABLE_VISION
 namespace Vision {
 struct VisionBuildResult;  // 定义见 vision/vision_geometry_adapter.h
 class VisionZeroCopyBridge;  // 定义见 vision/vision_zero_copy_bridge.h
 }  // namespace Vision
-#endif
 
 /**
  * @brief 光学系统 (Optics System)
@@ -50,7 +50,7 @@ class VisionZeroCopyBridge;  // 定义见 vision/vision_zero_copy_bridge.h
 /// 渲染后端枚举
 enum class RenderBackend : int {
     Native = 0,  ///< 默认 Vulkan/光栅化管线
-    Vision = 1,  ///< Vision CUDA 路径追踪后端
+    Vision = 1,  ///< Vision Vulkan 路径追踪后端
 };
 
 class OpticsSystem : public Kernel::SystemBase {
@@ -94,6 +94,7 @@ class OpticsSystem : public Kernel::SystemBase {
    private:
     friend struct VisionEmbeddedModeSwitchTest;
     friend struct VisionRuntimeGeometrySyncTest;
+    friend struct VisionDeviceLifetimeTest;
     bool initialize_vision_backend_if_enabled();
     bool initialize_hardware_resources();
     bool initialize_render_pipelines();
@@ -138,8 +139,7 @@ class OpticsSystem : public Kernel::SystemBase {
         bool external_live{false};
     };
 
-#ifdef CORONA_ENABLE_VISION
-    // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
+    // Vision 相关私有方法
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
     void run_vision_frame(float frame_count, uint64_t frame_index);
     void process_vision_actor_pick(std::uintptr_t camera_handle,
@@ -185,6 +185,7 @@ class OpticsSystem : public Kernel::SystemBase {
     void evict_idle_vision_runtimes(uint64_t frame_index);
     void activate_single_vision_runtime_key(const VisionPipelineKey& key);
     void clear_vision_runtimes();
+    void shutdown_vision_backend();
 
     /// 渲染线程起始处消费：若存在 pending 加载请求则切换 Vision 场景。
     /// 仅在 Vision 已初始化后执行；空路径表示卸载外部场景、回到引擎构建场景。
@@ -235,6 +236,9 @@ class OpticsSystem : public Kernel::SystemBase {
     std::size_t last_vision_mode_conflict_signature_{0};
     std::size_t last_vision_runtime_group_signature_{0};
     std::optional<VisionPipelineKey> active_vision_runtime_key_;
+    // Declared before the dependents so they are also destroyed first during
+    // ordinary C++ destruction. Normal engine shutdown releases this explicitly.
+    std::unique_ptr<ocarina::Device> vision_device_;
     std::unordered_map<VisionPipelineKey,
                        std::unique_ptr<VisionPipelineRuntime>,
                        VisionPipelineKeyHash>
@@ -243,7 +247,6 @@ class OpticsSystem : public Kernel::SystemBase {
                        std::shared_ptr<VisionSceneResource>,
                        VisionSceneResourceKeyHash>
         vision_scene_resources_;
-#endif  // CORONA_ENABLE_VISION
 
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};
@@ -391,7 +394,7 @@ class OpticsSystem : public Kernel::SystemBase {
 
     // ---- Vision 外部场景加载（跨线程：事件写请求，渲染线程消费）----
     // VisionSceneLoadEvent 只携带轻量请求写入此处；实际 import 在 run_vision_frame
-    // 起始的渲染线程执行，避免在 Python/CEF 线程触碰 CUDA pipeline。
+    // 起始的渲染线程执行，避免在 Python/CEF 线程触碰 Vulkan pipeline。
     std::mutex vision_scene_load_mutex_;
     std::optional<VisionSceneLoadRequest> pending_vision_scene_load_;
 

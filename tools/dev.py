@@ -35,27 +35,27 @@ LOCAL_RECIPES = (
 RECIPE_TOGGLE_ENV = "CORONA_CONAN_EXPORT_LOCAL_RECIPES"
 TARGET_FAMILY_OPTIONS: dict[str, tuple[str, ...]] = {
     "core": (
-        "&:with_examples=False", "&:with_tests=False", "&:with_vision=False",
+        "&:with_examples=False", "&:with_tests=False",
         "&:with_vision_tests=False", "&:with_oidn=False",
     ),
     "examples": (
-        "&:with_examples=True", "&:with_tests=False", "&:with_vision=True",
+        "&:with_examples=True", "&:with_tests=False",
         "&:with_vision_tests=False", "&:with_oidn=False",
     ),
     "tests": (
-        "&:with_examples=False", "&:with_tests=True", "&:with_vision=False",
+        "&:with_examples=False", "&:with_tests=True",
         "&:with_vision_tests=False", "&:with_oidn=False",
     ),
     "vision": (
-        "&:with_examples=False", "&:with_tests=False", "&:with_vision=True",
+        "&:with_examples=False", "&:with_tests=False",
         "&:with_vision_tests=False", "&:with_oidn=False",
     ),
     "vision-tests": (
-        "&:with_examples=False", "&:with_tests=True", "&:with_vision=True",
+        "&:with_examples=False", "&:with_tests=True",
         "&:with_vision_tests=True", "&:with_oidn=False",
     ),
     "vision-oidn": (
-        "&:with_examples=False", "&:with_tests=False", "&:with_vision=True",
+        "&:with_examples=False", "&:with_tests=False",
         "&:with_vision_tests=False", "&:with_oidn=True",
     ),
 }
@@ -67,6 +67,7 @@ VISION_TEST_TARGETS = {
     "corona_vision_pipeline_key_tests",
     "corona_vision_scene_resource_tests",
     "corona_vision_interop_lifetime_tests",
+    "corona_vision_device_lifetime_tests",
     "corona_vision_geometry_gpu_resource_tests",
 }
 
@@ -75,7 +76,7 @@ def target_family_for_target(target: str) -> str:
     lowered = target.lower()
     if lowered in {"all", "corona_engine"}:
         return "examples"
-    if lowered == "cp_oidn_cuda" or "oidn" in lowered:
+    if "oidn" in lowered:
         return "vision-oidn"
     if target.startswith("test-") or target.startswith("vision-test") or target in VISION_TEST_TARGETS:
         return "vision-tests"
