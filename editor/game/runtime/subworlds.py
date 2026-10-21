@@ -339,6 +339,8 @@ def _move(staged: Path, target: Path) -> None:
             return
         except OSError as error:
             last = error
+    if last is None:  # pragma: no cover - RENAME_ATTEMPTS is never zero
+        raise SubworldError(f'无法移动暂存副本：{staged}')
     raise last
 
 
